@@ -1,0 +1,483 @@
+import { useState, useMemo, Fragment } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import type { ContentBlock, ToolCall } from "../api/client";
+import { ThinkingBlock } from "./ThinkingBlock";
+import { ToolCallBlock } from "./ToolCallBlock";
+
+interface Props {
+  role: string;
+  content: string | null;
+  contentBlocks: ContentBlock[];
+  thinking: string | null;
+  isMeta: boolean;
+  toolCalls: Map<string, ToolCall>;
+  highlightQuery?: string | null;
+  sessionId?: string;
+  messageUuid?: string;
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      title={copied ? "Copied!" : "Copy"}
+      style={{
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        padding: "4px 8px",
+        borderRadius: 6,
+        color: copied ? "#16a34a" : "#999",
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        transition: "all 0.15s",
+        fontSize: 12,
+        fontFamily: "var(--font-sans)",
+      }}
+      onMouseEnter={(e) => { if (!copied) { e.currentTarget.style.color = "#6B6B6B"; e.currentTarget.style.background = "#F0F0EC"; } }}
+      onMouseLeave={(e) => { if (!copied) { e.currentTarget.style.color = "#999"; e.currentTarget.style.background = "none"; } }}
+    >
+      {copied ? (
+        <>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          Copied
+        </>
+      ) : (
+        <>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          Copy
+        </>
+      )}
+    </button>
+  );
+}
+
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query || !text) return text;
+  let regex: RegExp;
+  try {
+    regex = new RegExp(query, "gi");
+  } catch {
+    regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  }
+
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  let safety = 0;
+
+  while ((match = regex.exec(text)) !== null && safety++ < 100) {
+    if (match[0].length === 0) { regex.lastIndex++; continue; }
+    if (match.index > lastIdx) parts.push(text.slice(lastIdx, match.index));
+    parts.push(
+      <mark key={key++} style={{ background: "rgba(59, 130, 246, 0.25)", borderRadius: 2, padding: "0 1px" }}>
+        {match[0]}
+      </mark>
+    );
+    lastIdx = match.index + match[0].length;
+  }
+  if (parts.length === 0) return text;
+  if (lastIdx < text.length) parts.push(text.slice(lastIdx));
+
+  return <>{parts}</>;
+}
+
+function mapTextChildren(children: React.ReactNode, query: string): React.ReactNode {
+  if (typeof children === "string") return highlightText(children, query);
+  if (Array.isArray(children)) {
+    return children.map((child, i) =>
+      typeof child === "string"
+        ? <Fragment key={i}>{highlightText(child, query)}</Fragment>
+        : child
+    );
+  }
+  return children;
+}
+
+function UserMessageContent({ text, highlightQuery }: { text: string; highlightQuery?: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const maxHeight = 200;
+  const isLong = text.length > 600;
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div
+        style={{
+          maxHeight: !expanded && isLong ? maxHeight : "none",
+          overflow: "hidden",
+          position: "relative",
+          fontFamily: "var(--font-sans)",
+        }}
+      >
+        <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {highlightQuery ? highlightText(text, highlightQuery) : text}
+        </div>
+        {!expanded && isLong && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 48,
+              background: "linear-gradient(to top, #E8E5DE 0%, transparent 100%)",
+              pointerEvents: "none",
+            }}
+          />
+        )}
+      </div>
+      {isLong && !expanded && (
+        <button
+          onClick={() => setExpanded(true)}
+          style={{
+            background: "none",
+            border: "none",
+            color: "rgba(107, 107, 107, 0.8)",
+            cursor: "pointer",
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            padding: "4px 0 12px",
+            textAlign: "left",
+            width: "75%",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = "#1A1A1A")}
+          onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(107, 107, 107, 0.8)")}
+        >
+          Show more
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AttachmentViewer({ src, mediaType, onClose }: { src: string; mediaType: string; onClose: () => void }) {
+  const isImage = mediaType.startsWith("image/");
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#fff",
+          borderRadius: 12,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+          border: "1px solid #E5E5E2",
+          overflow: "hidden",
+          resize: "both",
+          minWidth: 300,
+          minHeight: 200,
+          maxWidth: "90vw",
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <div style={{ padding: "6px 12px", borderBottom: "1px solid #E5E5E2", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+          <span style={{ fontSize: 11, color: "#999" }}>{mediaType}</span>
+          <button
+            onClick={onClose}
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "#999", padding: "2px 6px", borderRadius: 4 }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "#F0F0EC"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+          >
+            {"\u2715"}
+          </button>
+        </div>
+        <div style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: 8 }}>
+          {isImage ? (
+            <img src={src} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 4 }} />
+          ) : (
+            <embed src={src} type={mediaType} style={{ width: "100%", height: "100%", minHeight: 500 }} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AttachmentBlock({ sessionId, messageUuid, blockIndex, mediaType }: { sessionId: string; messageUuid: string; blockIndex: number; mediaType: string }) {
+  const [open, setOpen] = useState(false);
+  const src = `/api/sessions/${sessionId}/messages/${messageUuid}/attachment/${blockIndex}`;
+  const isImage = mediaType.startsWith("image/");
+  const isPdf = mediaType === "application/pdf";
+
+  return (
+    <>
+      <div
+        onClick={() => setOpen(true)}
+        style={{
+          margin: "4px 0",
+          borderRadius: 8,
+          border: "1px solid #E5E5E2",
+          background: "#FAFAF8",
+          overflow: "hidden",
+          cursor: "pointer",
+          transition: "border-color 0.15s",
+          maxWidth: 80,
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#3b82f6"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#E5E5E2"; }}
+      >
+        {isImage ? (
+          <img src={src} style={{ display: "block", width: 80, height: 60, objectFit: "cover", borderRadius: "8px 8px 0 0" }} loading="lazy" />
+        ) : (
+          <div style={{ padding: 8, display: "flex", alignItems: "center", gap: 4 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            <span style={{ fontSize: 9, color: "#6B6B6B" }}>{isPdf ? "PDF" : mediaType}</span>
+          </div>
+        )}
+        <div style={{ padding: "2px 6px 3px", fontSize: 8, color: "#999", textAlign: "center" }}>
+          Click to view
+        </div>
+      </div>
+      {open && <AttachmentViewer src={src} mediaType={mediaType} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+export function MessageBubble({ role, content, contentBlocks: rawBlocks, thinking, isMeta, toolCalls, highlightQuery, sessionId, messageUuid }: Props) {
+  const highlightComponents = useMemo(() => {
+    if (!highlightQuery) return undefined;
+    const hl = (children: React.ReactNode) => mapTextChildren(children, highlightQuery);
+    return {
+      p: ({ node, children, ...props }: any) => <p {...props}>{hl(children)}</p>,
+      li: ({ node, children, ...props }: any) => <li {...props}>{hl(children)}</li>,
+      h1: ({ node, children, ...props }: any) => <h1 {...props}>{hl(children)}</h1>,
+      h2: ({ node, children, ...props }: any) => <h2 {...props}>{hl(children)}</h2>,
+      h3: ({ node, children, ...props }: any) => <h3 {...props}>{hl(children)}</h3>,
+      td: ({ node, children, ...props }: any) => <td {...props}>{hl(children)}</td>,
+      th: ({ node, children, ...props }: any) => <th {...props}>{hl(children)}</th>,
+    };
+  }, [highlightQuery]);
+
+  if (isMeta) return null;
+
+  const contentBlocks: ContentBlock[] = Array.isArray(rawBlocks) ? rawBlocks : [];
+
+  // System compaction marker
+  if (role === "system") {
+    return (
+      <div style={{ padding: "8px 20px", display: "flex", alignItems: "center", gap: 10, justifyContent: "center" }}>
+        <span
+          style={{
+            fontSize: 11,
+            color: "#ca8a04",
+            background: "rgba(202, 138, 4, 0.06)",
+            padding: "3px 10px",
+            borderRadius: 8,
+            fontFamily: "var(--font-sans)",
+          }}
+        >
+          {content || "context compacted"}
+        </span>
+      </div>
+    );
+  }
+
+  const isUser = role === "user";
+  const isToolResultOnly = isUser
+    && contentBlocks.length > 0
+    && contentBlocks.every((b) => b.type === "tool_result");
+
+  // ─── Tool-result-only user messages: hidden (output shown inline in ToolCallBlock) ─────
+  if (isToolResultOnly) return null;
+
+  // ─── User message: right-aligned bubble, sans-serif ─────
+  if (isUser) {
+    const rawText =
+      contentBlocks
+        .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+        .map((b) => b.text)
+        .join("\n") || content || "";
+
+    // Strip XML/HTML tags and normalize inter-tag whitespace
+    const text = rawText
+      .replace(/<[^>]+>/g, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l)
+      .join("\n");
+
+    const hasImages = contentBlocks.some((b) => b.type === "image" || b.type === "document");
+    if (!text && !hasImages) return null;
+
+    return (
+      <div className="fade-up" style={{ padding: "8px 20px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+        {hasImages && sessionId && messageUuid && (
+          <div style={{ maxWidth: "85%", display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "flex-end" }}>
+            {contentBlocks.map((block, i) => {
+              if (block.type !== "image" && block.type !== "document") return null;
+              const mt = (block as any).source?.media_type || (block as any).source?.mediaType || "image/png";
+              return <AttachmentBlock key={i} sessionId={sessionId} messageUuid={messageUuid} blockIndex={i} mediaType={mt} />;
+            })}
+          </div>
+        )}
+        {text && (
+          <div
+            style={{
+              maxWidth: "85%",
+              background: "#E8E5DE",
+              borderRadius: "16px",
+              padding: "10px 16px",
+              lineHeight: 1.6,
+              color: "#1A1A1A",
+              fontFamily: "var(--font-sans)",
+              fontSize: 16,
+            }}
+          >
+            <UserMessageContent text={text} highlightQuery={highlightQuery} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── Assistant message: skip if truly empty ─────
+  const hasText = contentBlocks.some((b) => b.type === "text" && (b as any).text);
+  const hasTools = contentBlocks.some((b) => b.type === "tool_use");
+  const hasAttachments = contentBlocks.some((b) => b.type === "image" || b.type === "document");
+  if (!hasText && !hasTools && !hasAttachments && !thinking && !content) return null;
+
+  // Build full copyable text including thinking, tool calls, and results
+  const allText = (() => {
+    const parts: string[] = [];
+    if (thinking) parts.push(`<thinking>\n${thinking}\n</thinking>`);
+    for (const block of contentBlocks) {
+      if (block.type === "text" && block.text) {
+        parts.push(block.text);
+      } else if (block.type === "tool_use") {
+        const tc = toolCalls.get(block.id);
+        let toolText = `[Tool: ${block.name}]`;
+        if (block.input && typeof block.input === "object") {
+          const inp = block.input as Record<string, unknown>;
+          if (inp.command) toolText += `\n$ ${inp.command}`;
+          else if (inp.file_path) toolText += `\n${inp.file_path}`;
+          else if (inp.pattern) toolText += `\n${inp.pattern}`;
+        }
+        if (tc?.output) toolText += `\n${tc.output}`;
+        if (tc?.error) toolText += `\n[Error] ${tc.error}`;
+        parts.push(toolText);
+      }
+    }
+    return parts.join("\n\n") || content || "";
+  })();
+
+  // Generate tool call summary
+  const toolSummary = (() => {
+    const tools = contentBlocks.filter((b) => b.type === "tool_use") as Array<{ type: "tool_use"; name: string; input: unknown }>;
+    if (tools.length === 0) return null;
+    const counts: Record<string, number> = {};
+    for (const t of tools) counts[t.name] = (counts[t.name] || 0) + 1;
+    const parts: string[] = [];
+    if (counts.Grep) parts.push(`${counts.Grep} pattern${counts.Grep > 1 ? "s" : ""} searched`);
+    if (counts.Glob) parts.push(`${counts.Glob} glob${counts.Glob > 1 ? "s" : ""} matched`);
+    if (counts.Read) parts.push(`${counts.Read} file${counts.Read > 1 ? "s" : ""} read`);
+    if (counts.Edit) parts.push(`${counts.Edit} file${counts.Edit > 1 ? "s" : ""} edited`);
+    if (counts.Write) parts.push(`${counts.Write} file${counts.Write > 1 ? "s" : ""} written`);
+    if (counts.Bash) parts.push(`${counts.Bash} command${counts.Bash > 1 ? "s" : ""} run`);
+    if (counts.Agent) parts.push(`${counts.Agent} agent${counts.Agent > 1 ? "s" : ""} dispatched`);
+    const other = Object.entries(counts).filter(([n]) => !["Grep","Glob","Read","Edit","Write","Bash","Agent"].includes(n));
+    for (const [name, count] of other) parts.push(`${count} ${name}`);
+    return parts.length > 0 ? parts.join(", ") : `${tools.length} tool call${tools.length > 1 ? "s" : ""}`;
+  })();
+
+  // ─── Assistant message: serif font, copy button ─────
+  return (
+    <div className="fade-up" style={{ padding: "12px 4px" }}>
+      <div style={{ minWidth: 0, fontFamily: "var(--font-serif)", lineHeight: "1.65rem" }}>
+        {thinking && <ThinkingBlock content={thinking} />}
+
+        {toolSummary && (
+          <div style={{ fontSize: 11, color: "#999", fontFamily: "var(--font-sans)", padding: "0 8px 4px", letterSpacing: "0.01em" }}>
+            {toolSummary}
+          </div>
+        )}
+
+        {contentBlocks.map((block, i) => {
+          if (block.type === "text" && block.text) {
+            return (
+              <div key={i} className="prose-chat" style={{ fontFamily: "var(--font-serif)" }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={highlightComponents}>
+                  {block.text}
+                </ReactMarkdown>
+              </div>
+            );
+          }
+          if (block.type === "tool_use") {
+            return (
+              <ToolCallBlock
+                key={i}
+                toolName={block.name}
+                input={block.input}
+                result={toolCalls.get(block.id)}
+              />
+            );
+          }
+          if ((block.type === "image" || block.type === "document") && sessionId && messageUuid) {
+            const mt = (block as any).source?.media_type || (block as any).source?.mediaType || "image/png";
+            return <AttachmentBlock key={i} sessionId={sessionId} messageUuid={messageUuid} blockIndex={i} mediaType={mt} />;
+          }
+          return null;
+        })}
+
+        {contentBlocks.length === 0 && content && (
+          <div className="prose-chat" style={{ fontFamily: "var(--font-serif)" }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={highlightComponents}>
+              {content}
+            </ReactMarkdown>
+          </div>
+        )}
+
+        {allText && (() => {
+          const hasPending = contentBlocks.some((b) => b.type === "tool_use" && !toolCalls.get((b as any).id)?.status);
+          const saving = hasPending;
+          return (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8 }}>
+              <CopyButton text={allText} />
+              {saving ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "#D97706", fontSize: 11, fontFamily: "var(--font-sans)", opacity: 0.7 }}>
+                  <span className="spin" style={{ width: 10, height: 10, display: "inline-block" }}>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" style={{ width: "100%", fill: "#D97706" }}>
+                      <path d="m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z" />
+                    </svg>
+                  </span>
+                  Saving to DB...
+                </span>
+              ) : (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "#16a34a", fontSize: 11, fontFamily: "var(--font-sans)", opacity: 0.7 }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  Saved to DB{hasAttachments ? " (incl. images)" : ""}
+                </span>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
